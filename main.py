@@ -13,8 +13,8 @@ load_dotenv()
 API_TOKEN = os.getenv('API_TOKEN')
 
 WEBHOOK_HOST = os.getenv('WEBHOOK_HOST')
-WEBHOOK_PORT = os.getenv('WEBHOOK_PORT')  # 443, 80, 88 or 8443 (port need to be 'open')
-WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN')  # In some VPS you may need to put here the IP addr
+WEBHOOK_PORT = os.getenv('WEBHOOK_PORT')
+WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN')
 
 WEBHOOK_SSL_CERT = './webhook_cert.pem'  # Path to the ssl certificate
 WEBHOOK_SSL_PRIV = './webhook_pkey.pem'  # Path to the ssl private key
@@ -65,7 +65,6 @@ def webhook():
         flask.abort(403)
 
 
-# Handle '/start' and '/help'
 @bot.message_handler(commands=['help', 'start'])
 def send_welcome(message):
     bot.reply_to(message,
@@ -76,17 +75,28 @@ def send_welcome(message):
 # Handle all other messages
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def echo_message(message):
-    bot.reply_to(message, message.text)
+    bot.send_message(message.chat.id, 'I don\'t understand.')
 
 
 # Remove webhook, it fails sometimes the set if there is a previous webhook
-bot.remove_webhook()
+try:
+    bot.remove_webhook()
+except Exception as error:
+    message = 'An error has occurred while removing webhook.'
+    logger.error(message, error)
 
 time.sleep(1)
 
 # Set webhook
-bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH,
+try:
+    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH,
                 certificate=open(WEBHOOK_SSL_CERT, 'r'))
+
+except Exception as error:
+    message = 'An error has occurred while setting webhook.'
+    logger.error(message, error)
+
+logger.debug('Webhook set!')
 
 # Start flask server
 app.run(host=WEBHOOK_LISTEN,
