@@ -1,105 +1,109 @@
-import logging
+import asyncio
 import os
-import time
-from logging.handlers import RotatingFileHandler
+import ssl
 
-import flask
-import telebot
+from aiogram import types
+from aiogram.utils.exceptions import ChatNotFound, ChatIdIsEmpty, BotBlocked
+from aiohttp import web
 from dotenv import load_dotenv
 
+import handlers
+from bot import bot, dp
+from logger import logger
 
 load_dotenv()
 
 API_TOKEN = os.getenv('API_TOKEN')
-
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 WEBHOOK_HOST = os.getenv('WEBHOOK_HOST')
 WEBHOOK_PORT = os.getenv('WEBHOOK_PORT')
-WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN')
 
-WEBHOOK_SSL_CERT = './webhook_cert.pem'  # Path to the ssl certificate
-WEBHOOK_SSL_PRIV = './webhook_pkey.pem'  # Path to the ssl private key
+# Путь к SSL сертификату.
+WEBHOOK_SSL_CERT = './webhook_certificates/webhook_cert.pem'
+# Путь к приватному ключу SSL.
+WEBHOOK_SSL_PRIV = './webhook_certificates/webhook_pkey.pem'
 
-# Quick'n'dirty SSL certificate generation:
-#
-# openssl genrsa -out webhook_pkey.pem 2048
-# openssl req -new -x509 -days 3650 -key webhook_pkey.pem -out webhook_cert.pem
-#
-# When asked for "Common Name (e.g. server FQDN or YOUR name)" you should reply
-# with the same value in you put in WEBHOOK_HOST
+# Инициализация SSL контекста
+# ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+# ssl_context.load_cert_chain(certfile=WEBHOOK_SSL_CERT, keyfile=WEBHOOK_SSL_PRIV)
 
-WEBHOOK_URL_BASE = "https://%s:%s" % (WEBHOOK_HOST, WEBHOOK_PORT)
-WEBHOOK_URL_PATH = "/%s/" % (API_TOKEN)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = RotatingFileHandler(
-    'bot.log',
-    encoding='UTF-8',
-    maxBytes=5000000,
-)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-bot = telebot.TeleBot(API_TOKEN)
-
-app = flask.Flask(__name__)
+app = web.Application()
 
 
-# Empty webserver index, return nothing, just http 200
-@app.route('/', methods=['GET', 'HEAD'])
-def index():
-    return ''
+async def on_startup(*args) -> None:
+    """Функция, запускащаяся при старте бота.
+
+    Отправляет администратору сообщение об успешном запуске.
+    """
+    logger.debug('Отправляем сообщение о старте бота администратору')
+    await bot.send_message(chat_id=ADMIN_CHAT_ID, text="Бот запущен!")
 
 
-# Process webhook calls
-@app.route(WEBHOOK_URL_PATH, methods=['POST'])
-def webhook():
-    if flask.request.headers.get('content-type') == 'application/json':
-        json_string = flask.request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return ''
+async def on_shutdown(*args):
+    """Функция, запускащаяся при завершении работы бота.
+
+    Отправляет администратору сообщение об остановке, снимает вебхук и
+    завершает сессию.
+    """
+    logger.warning('Завершаем работу бота..')
+
+    logger.debug('Отправляем сообщение об остановке бота администратору')
+    await bot.send_message(chat_id=ADMIN_CHAT_ID, text="Bot is shutting down")
+
+    logger.debug('Снимаем вебхук')
+    await bot.delete_webhook()
+
+    logger.debug('Завершаем сессию')
+    await bot.session.close()
+
+
+async def webhook_handler(request):
+    """Функция установки вебхука и """
+    if request.match_info.get('token') == API_TOKEN:
+        request_body_dict = await request.json()
+        update = types.Update(**request_body_dict)
+        await dp.process_update(update)
+        return web.Response()
     else:
-        flask.abort(403)
+        return web.Response(status=403)
 
 
-@bot.message_handler(commands=['help', 'start'])
-def send_welcome(message):
-    bot.reply_to(message,
-                 ("Hello there, I am Multipurpose Telebot!.\n"
-                  "I am here to make your life better."))
+async def main() -> None:
+    """Основная логика для запуска webhook."""
+    try:
+        # Раскомментировать строки с пометкой #WEBHOOK, если запуск бота ;
+        # Производится через webhook. Аналогично, если запуск производится ;
+        # Через polling - раскомментировать строку с пометкой #POLLING.
+
+        #WEBHOOK app.router.add_post('/{token}', webhook_handler)
+        await on_startup()
+        #WEBHOOK app.on_startup.append(on_startup)
+        #WEBHOOK app.on_shutdown.append(on_shutdown)
+        #WEBHOOK web.run_app(app, host=WEBHOOK_HOST,
+        #WEBHOOK             port=WEBHOOK_PORT, ssl_context=ssl_context)
+
+    except ChatNotFound as chat_nf_error:
+        msg_error = f'Пользователь с таким Chat_ID не найден! {chat_nf_error}'
+        logger.error(msg_error)
+
+    except ChatIdIsEmpty as chat_id_error:
+        msg_error = (f'Для ADMIN_CHAT_ID в '
+                     f'.env файле не задано значение! {chat_id_error}')
+        logger.error(msg_error)
+
+    except BotBlocked as bot_blocked_error:
+        msg_error = f'Бот заблокирован администратором! {bot_blocked_error}'
+        logger.error(msg_error)
+
+    except Exception as error:
+        msg_error = (f'Ошибка отправки сообщения '
+                     f'о состоянии бота администратору! {error}')
+        logger.error(msg_error)
 
 
-# Handle all other messages
-@bot.message_handler(func=lambda message: True, content_types=['text'])
-def echo_message(message):
-    bot.send_message(message.chat.id, 'I don\'t understand.')
+if __name__ == "__main__":
 
-
-# Remove webhook, it fails sometimes the set if there is a previous webhook
-try:
-    bot.remove_webhook()
-except Exception as error:
-    message = 'An error has occurred while removing webhook.'
-    logger.error(message, error)
-
-time.sleep(1)
-
-# Set webhook
-try:
-    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH,
-                certificate=open(WEBHOOK_SSL_CERT, 'r'))
-
-except Exception as error:
-    message = 'An error has occurred while setting webhook.'
-    logger.error(message, error)
-
-logger.debug('Webhook set!')
-
-# Start flask server
-app.run(host=WEBHOOK_LISTEN,
-        port=WEBHOOK_PORT,
-        ssl_context=(WEBHOOK_SSL_CERT, WEBHOOK_SSL_PRIV),
-        debug=True)
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
+    # Раскомментировать строку если бот запускается через polling.
+    # loop.run_until_complete(dp.start_polling())
